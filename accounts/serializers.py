@@ -30,16 +30,16 @@ class AdminLoginSerializer(serializers.Serializer):
 
         refresh = RefreshToken()
 
-        refresh["admin_id"] = admin.id
+        refresh["user_id"] = admin.id
         refresh["role"] = "admin"
 
         access = refresh.access_token
-        access["admin_id"] = admin.id
+        access["user_id"] = admin.id
         access["role"] = "admin"
 
         return {
             "message": "Login successful",
-            "admin_id": admin.id,
+            "user_id": admin.id,
             "role": "admin",
             "access": str(access),
             "refresh": str(refresh),

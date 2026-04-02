@@ -97,3 +97,23 @@ def get_vendor_profile(request):
         "profile": serializer.data,
         "is_new": created
     })
+from rest_framework import viewsets
+
+
+
+from .models import VendorServicePricing
+from .serializers import VendorServicePricingSerializer
+
+
+class VendorServicePricingViewSet(viewsets.ModelViewSet):
+    serializer_class = VendorServicePricingSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        return VendorServicePricing.objects.filter(
+            vendor_id=self.request.user.id
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(vendor_id=self.request.user.id)

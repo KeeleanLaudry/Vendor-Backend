@@ -156,3 +156,31 @@ class VendorAddon(models.Model):
 
     def __str__(self):
         return f"{self.vendor.company_name or self.vendor.phone} - {self.key}"
+from django.db import models
+from catalog.models import ServiceCategory, ItemType, AttributeOption
+
+
+class VendorServicePricing(models.Model):
+
+    vendor_id = models.IntegerField()
+
+    service = models.ForeignKey(ServiceCategory, on_delete=models.CASCADE)
+    item = models.ForeignKey(ItemType, on_delete=models.CASCADE)
+
+    attribute_options = models.ManyToManyField(AttributeOption, blank=True)
+
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    image = models.ImageField(upload_to="vendor_services/", null=True, blank=True)
+
+    turnaround_time = models.CharField(max_length=100, blank=True, null=True)
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "vendor_service_pricing"
+
+    def __str__(self):
+        return f"{self.vendor_id} - {self.service.name} - {self.item.name}"

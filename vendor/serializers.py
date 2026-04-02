@@ -6,7 +6,8 @@ import random
 
 from .models import Vendor, VendorOTP, VendorProfile
 from .utils import send_whatsapp_otp
-
+from .models import VendorServicePricing
+from catalog.models import AttributeOption
 
 # ---------------------------------------------------------
 class RequestOTPSerializer(serializers.Serializer):
@@ -109,3 +110,64 @@ class VendorProfileSerializer(serializers.ModelSerializer):
 
         instance.save()
         return instance
+
+
+class VendorServicePricingSerializer(serializers.ModelSerializer):
+    attribute_options = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=AttributeOption.objects.all()
+    )
+
+    class Meta:
+        model = VendorServicePricing
+        fields = "__all__"
+        read_only_fields = ["vendor_id"]
+
+    def validate(self, attrs):
+        request = self.context["request"]
+        vendor_id = request.user.id
+
+        service = attrs.get("service")
+        item = attrs.get("item")
+        attribute_options = attrs.get("attribute_options", [])
+
+        # ✅ 1. Prevent duplicate combination
+        existing = VendorServicePricing.objects.filter(
+            vendor_id=vendor_id,
+            service=service,
+            item=item
+        )
+
+        for pricing in existing:
+            existing_ids = set(pricing.attribute_options.values_list("id", flat=True))
+            new_ids = set([opt.id for opt in attribute_options])
+
+            if existing_ids == new_ids:
+                raise serializers.ValidationError(
+                    "This combination already exists"
+                )
+
+        # ✅ 2. Validate attribute belongs to item
+        for option in attribute_options:
+            attr_type = option.attribute_type
+
+            if item.id not in attr_type.applicable_items.values_list("id", flat=True):
+                raise serializers.ValidationError(
+                    f"{option.name} is not valid for selected item"
+                )
+
+        # ✅ 3. Prevent multiple options of same attribute
+        seen_types = set()
+
+        for option in attribute_options:
+            attr_type_id = option.attribute_type.id
+
+            if attr_type_id in seen_types:
+                raise serializers.ValidationError(
+                    f"Multiple options selected for {option.attribute_type.name}"
+                )
+
+            seen_types.add(attr_type_id)
+
+        return attrs
+

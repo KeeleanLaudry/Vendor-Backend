@@ -7,8 +7,10 @@ import random
 from .models import Vendor, VendorOTP, VendorProfile
 from .utils import send_whatsapp_otp
 from .models import VendorServicePricing
-from catalog.models import AttributeOption
-
+from catalog.models import (
+   AttributeOption, AddOn, FoldingOption, CustomisationOption,
+    ItemAddOn, ItemFolding, ItemCustomisation
+)
 # ---------------------------------------------------------
 class RequestOTPSerializer(serializers.Serializer):
     phone = serializers.CharField(required=True)
@@ -168,6 +170,71 @@ class VendorServicePricingSerializer(serializers.ModelSerializer):
                 )
 
             seen_types.add(attr_type_id)
+
+        return attrs
+    
+ 
+
+class ItemAddOnSerializer(serializers.ModelSerializer):
+    addon_name  = serializers.CharField(source='addon.name', read_only=True)
+    addon_price = serializers.DecimalField(source='addon.price', max_digits=10, decimal_places=2, read_only=True)
+
+    class Meta:
+        model  = ItemAddOn
+        fields = ['id', 'item_type', 'addon', 'addon_name', 'addon_price']
+
+    def validate(self, attrs):
+        request   = self.context['request']
+        item_type = attrs.get('item_type')
+
+        # Ensure vendor owns this item_type via their pricing
+        if not VendorServicePricing.objects.filter(
+            vendor_id=request.user.id,
+            item=item_type
+        ).exists():
+            raise serializers.ValidationError("You don't have this item in your catalog")
+
+        return attrs
+
+
+class ItemFoldingSerializer(serializers.ModelSerializer):
+    folding_name  = serializers.CharField(source='folding_option.name', read_only=True)
+    folding_price = serializers.DecimalField(source='folding_option.price', max_digits=10, decimal_places=2, read_only=True)
+
+    class Meta:
+        model  = ItemFolding
+        fields = ['id', 'item_type', 'folding_option', 'folding_name', 'folding_price']
+
+    def validate(self, attrs):
+        request   = self.context['request']
+        item_type = attrs.get('item_type')
+
+        if not VendorServicePricing.objects.filter(
+            vendor_id=request.user.id,
+            item=item_type
+        ).exists():
+            raise serializers.ValidationError("You don't have this item in your catalog")
+
+        return attrs
+
+
+class ItemCustomisationSerializer(serializers.ModelSerializer):
+    customisation_name  = serializers.CharField(source='customisation_option.name', read_only=True)
+    customisation_price = serializers.DecimalField(source='customisation_option.price', max_digits=10, decimal_places=2, read_only=True)
+
+    class Meta:
+        model  = ItemCustomisation
+        fields = ['id', 'item_type', 'customisation_option', 'customisation_name', 'customisation_price']
+
+    def validate(self, attrs):
+        request   = self.context['request']
+        item_type = attrs.get('item_type')
+
+        if not VendorServicePricing.objects.filter(
+            vendor_id=request.user.id,
+            item=item_type
+        ).exists():
+            raise serializers.ValidationError("You don't have this item in your catalog")
 
         return attrs
 

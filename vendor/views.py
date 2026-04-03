@@ -12,6 +12,12 @@ from .serializers import (
 )
 from .models import VendorProfile
 
+from catalog.models import ItemAddOn, ItemFolding, ItemCustomisation
+from .serializers import (
+    ItemAddOnSerializer,
+    ItemFoldingSerializer,
+    ItemCustomisationSerializer,
+)
 
 # --------------------------------
 # REQUEST OTP
@@ -117,3 +123,67 @@ class VendorServicePricingViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(vendor_id=self.request.user.id)
+
+
+
+
+class VendorItemAddOnViewSet(viewsets.ModelViewSet):
+    serializer_class   = ItemAddOnSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        # Vendor only sees add-ons linked to their own items
+        vendor_item_ids = VendorServicePricing.objects.filter(
+            vendor_id=self.request.user.id
+        ).values_list('item_id', flat=True)
+
+        qs = ItemAddOn.objects.filter(
+            item_type_id__in=vendor_item_ids
+        ).select_related('addon', 'item_type')
+
+        # Optional filter: ?item_type=3
+        item_type = self.request.query_params.get('item_type')
+        if item_type:
+            qs = qs.filter(item_type_id=item_type)
+
+        return qs
+
+
+class VendorItemFoldingViewSet(viewsets.ModelViewSet):
+    serializer_class   = ItemFoldingSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        vendor_item_ids = VendorServicePricing.objects.filter(
+            vendor_id=self.request.user.id
+        ).values_list('item_id', flat=True)
+
+        qs = ItemFolding.objects.filter(
+            item_type_id__in=vendor_item_ids
+        ).select_related('folding_option', 'item_type')
+
+        item_type = self.request.query_params.get('item_type')
+        if item_type:
+            qs = qs.filter(item_type_id=item_type)
+
+        return qs
+
+
+class VendorItemCustomisationViewSet(viewsets.ModelViewSet):
+    serializer_class   = ItemCustomisationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        vendor_item_ids = VendorServicePricing.objects.filter(
+            vendor_id=self.request.user.id
+        ).values_list('item_id', flat=True)
+
+        qs = ItemCustomisation.objects.filter(
+            item_type_id__in=vendor_item_ids
+        ).select_related('customisation_option', 'item_type')
+
+        item_type = self.request.query_params.get('item_type')
+        if item_type:
+            qs = qs.filter(item_type_id=item_type)
+
+        return qs

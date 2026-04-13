@@ -1,22 +1,13 @@
+# accounts/permissions.py
+
 from rest_framework.permissions import BasePermission
-from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework.exceptions import AuthenticationFailed
 
 
 class IsAdminJWT(BasePermission):
     def has_permission(self, request, view):
-        auth = JWTAuthentication()
+        user = request.user
 
-        try:
-            validated_token = auth.get_validated_token(
-                auth.get_raw_token(
-                    auth.get_header(request)
-                )
-            )
-        except Exception:
-            raise AuthenticationFailed("Invalid or expired token")
+        if not user or not user.is_authenticated:
+            return False
 
-        if validated_token.get("role") != "admin":
-            raise AuthenticationFailed("Admin access required")
-
-        return True
+        return getattr(user, "role", None) == "admin"

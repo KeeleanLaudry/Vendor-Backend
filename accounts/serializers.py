@@ -1,3 +1,5 @@
+# accounts/serializers.py
+
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import AdminUser
@@ -8,15 +10,12 @@ class AdminLoginSerializer(serializers.Serializer):
     password = serializers.CharField()
 
     def validate(self, data):
-        email = data.get("email")
-        password = data.get("password")
-
         try:
-            admin = AdminUser.objects.get(email=email)
+            admin = AdminUser.objects.get(email=data["email"])
         except AdminUser.DoesNotExist:
             raise serializers.ValidationError("Invalid credentials")
 
-        if not admin.check_password(password):
+        if not admin.check_password(data["password"]):
             raise serializers.ValidationError("Invalid credentials")
 
         if not admin.is_active:
@@ -30,6 +29,7 @@ class AdminLoginSerializer(serializers.Serializer):
 
         refresh = RefreshToken()
 
+        # 🔥 IMPORTANT: custom payload
         refresh["user_id"] = admin.id
         refresh["role"] = "admin"
 

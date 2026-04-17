@@ -3,7 +3,11 @@ from django.utils import timezone
 from django.contrib.auth.models import AbstractUser
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
+# vendors/models.py
 
+
+from django.core.validators import MinValueValidator
+from decimal import Decimal
 from catalog.models import (
     ServiceCategory,
     Category,  # ✨ NEW
@@ -542,3 +546,234 @@ def log_price_change(sender, instance, **kwargs):
 #   - VendorPriceCustomisation (customisation options with prices)
 #   - VendorPriceAudit (automatic audit trail)
 # ==================================================================================
+
+
+
+
+class VendorPricing(models.Model):
+    """
+    Flexible pricing model - vendor can set price at any level:
+    - All services (global)
+    - Service level
+    - Category level
+    - Subcategory level
+    - Item level (most specific)
+    
+    Priority: Item > Subcategory > Category > Service > All
+    """
+    
+    PRICING_LEVEL_CHOICES = [
+        ('all', 'All Services'),
+        ('service', 'Service Level'),
+        ('category', 'Category Level'),
+        ('subcategory', 'Subcategory Level'),
+        ('item', 'Item Level'),
+    ]
+    
+    vendor = models.ForeignKey(
+        'Vendor',
+        on_delete=models.CASCADE,
+        related_name='pricing_rules'
+    )
+    
+    # Optional hierarchy fields - set based on pricing level
+    service = models.ForeignKey(
+        'catalog.ServiceCategory',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='vendor_prices'
+    )
+    category = models.ForeignKey(
+        'catalog.Category',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='vendor_prices'
+    )
+    subcategory = models.ForeignKey(
+        'catalog.Subcategory',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='vendor_prices'
+    )
+    item = models.ForeignKey(
+        'catalog.ItemType',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='vendor_prices'
+    )
+    
+    # Pricing
+    base_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))]
+    )
+    
+    # Metadata
+    pricing_level = models.CharField(
+        max_length=20,
+        choices=PRICING_LEVEL_CHOICES
+    )
+    is_active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True, null=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'vendor_pricing'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['vendor', 'is_active']),
+            models.Index(fields=['service', 'category', 'subcategory', 'item']),
+        ]
+        # Prevent duplicate pricing rules
+        unique_together = [
+            ['vendor', 'service', 'category', 'subcategory', 'item']
+        ]
+    
+    def __str__(self):
+        parts = []
+        if self.service:
+            parts.append(self.service.name)
+        if self.category:
+            parts.append(self.category.name)
+        if self.subcategory:
+            parts.append(self.subcategory.name)
+        if self.item:
+            parts.append(self.item.name)
+        
+        path = ' → '.join(parts) if parts else 'All Services'
+        return f"{self.vendor.company_name}: {path} = AED {self.base_price}"
+    
+    def save(self, *args, **kwargs):
+        """Auto-determine pricing level based on what's set"""
+        if self.item:
+            self.pricing_level = 'item'
+        elif self.subcategory:
+            self.pricing_level = 'subcategory'
+        elif self.category:
+            self.pricing_level = 'category'
+        elif self.service:
+            self.pricing_level = 'service'
+        else:
+            self.pricing_level = 'all'
+        
+        super().save(*args, **kwargs)
+    
+    @staticmethod
+    def get_price_for_item(vendor_id, service_id, category_id, subcategory_id, item_id):
+        """
+        Get vendor's price for a specific item combination.
+        Checks from most specific to least specific.
+        Returns (price, pricing_object) or (None, None)
+        """
+        # 1. Check item-level price (most specific)
+        price_obj = VendorPricing.objects.filter(
+            vendor_id=vendor_id,
+            service_id=service_id,
+            category_id=category_id,
+            subcategory_id=subcategory_id,
+            item_id=item_id,
+            is_active=True
+        ).first()
+        if price_obj:
+            return price_obj.base_price, price_obj
+        
+        # 2. Check subcategory-level price
+        price_obj = VendorPricing.objects.filter(
+            vendor_id=vendor_id,
+            service_id=service_id,
+            category_id=category_id,
+            subcategory_id=subcategory_id,
+            item_id=None,
+            is_active=True
+        ).first()
+        if price_obj:
+            return price_obj.base_price, price_obj
+        
+        # 3. Check category-level price
+        price_obj = VendorPricing.objects.filter(
+            vendor_id=vendor_id,
+            service_id=service_id,
+            category_id=category_id,
+            subcategory_id=None,
+            item_id=None,
+            is_active=True
+        ).first()
+        if price_obj:
+            return price_obj.base_price, price_obj
+        
+        # 4. Check service-level price
+        price_obj = VendorPricing.objects.filter(
+            vendor_id=vendor_id,
+            service_id=service_id,
+            category_id=None,
+            subcategory_id=None,
+            item_id=None,
+            is_active=True
+        ).first()
+        if price_obj:
+            return price_obj.base_price, price_obj
+        
+        # 5. Check global price (all services)
+        price_obj = VendorPricing.objects.filter(
+            vendor_id=vendor_id,
+            service_id=None,
+            category_id=None,
+            subcategory_id=None,
+            item_id=None,
+            is_active=True
+        ).first()
+        if price_obj:
+            return price_obj.base_price, price_obj
+        
+        # 6. No price found
+        return None, None
+
+
+class VendorPricingTemplate(models.Model):
+    """
+    Reusable pricing templates
+    Vendor can save common pricing structures and apply them
+    """
+    vendor = models.ForeignKey('Vendor', on_delete=models.CASCADE)
+    name = models.CharField(max_length=100)  # e.g., "Standard Pricing", "Premium"
+    description = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'vendor_pricing_template'
+        unique_together = ['vendor', 'name']
+    
+    def __str__(self):
+        return f"{self.vendor.company_name}: {self.name}"
+
+
+class VendorPricingTemplateItem(models.Model):
+    """
+    Individual pricing rules within a template
+    """
+    template = models.ForeignKey(
+        VendorPricingTemplate,
+        on_delete=models.CASCADE,
+        related_name='items'
+    )
+    
+    service = models.ForeignKey('catalog.ServiceCategory', null=True, blank=True, on_delete=models.CASCADE)
+    category = models.ForeignKey('catalog.Category', null=True, blank=True, on_delete=models.CASCADE)
+    subcategory = models.ForeignKey('catalog.Subcategory', null=True, blank=True, on_delete=models.CASCADE)
+    item = models.ForeignKey('catalog.ItemType', null=True, blank=True, on_delete=models.CASCADE)
+    
+    base_price = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    class Meta:
+        db_table = 'vendor_pricing_template_item'
+    
+    def __str__(self):
+        return f"{self.template.name}: AED {self.base_price}"

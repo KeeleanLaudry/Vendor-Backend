@@ -146,9 +146,11 @@ MEDIA_ROOT = BASE_DIR / "media"
 #  DRF CONFIG
 # ================================================================
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": (
-      "accounts.authentication.AdminVendorJWTAuthentication",
-    ),
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "vendor.authentication.VendorJWTAuthentication",      # ✅ Vendor auth
+        "accounts.authentication.AdminVendorJWTAuthentication",  # ✅ Admin auth
+        "rest_framework_simplejwt.authentication.JWTAuthentication",  # ✅ Fallback
+    ],
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
         "rest_framework.renderers.BrowsableAPIRenderer" if DEBUG else "rest_framework.renderers.JSONRenderer",

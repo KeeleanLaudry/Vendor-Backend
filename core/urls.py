@@ -11,7 +11,7 @@ def home(request):
 urlpatterns = [
     path('', home),   # 👈 add this
     path('admin/', admin.site.urls),
-    path("vendor/", include("vendor.urls")),
+      path('api/vendor/', include('vendor.urls')), 
     path("accounts/", include("accounts.urls")),
     path('api/catalog/', include('catalog.urls')),
   

@@ -44,11 +44,11 @@ class CategorySerializer(serializers.ModelSerializer):
 
 class CategoryListSerializer(serializers.ModelSerializer):
     """Lightweight version for dropdowns"""
-    service_count = serializers.SerializerMethodField()
+    services = ServiceCategorySerializer(many=True, read_only=True)  # ✅ ADD THIS LINE
     
     class Meta:
         model = Category
-        fields = ['id', 'name', 'is_active', 'service_count']
+        fields = ['id', 'name', 'is_active', 'services']  # ✅ ADD 'services' HERE
     
     def get_service_count(self, obj):
         return obj.services.filter(is_active=True).count()

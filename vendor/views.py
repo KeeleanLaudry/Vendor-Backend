@@ -1,33 +1,33 @@
-from rest_framework.decorators import api_view, parser_classes, permission_classes, action
+from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import status, viewsets
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import AllowAny
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Count, Avg
+from django.http import HttpResponse
+import csv
+import io
+
+from .authentication import VendorJWTAuthentication
+from .permissions import IsVendorJWT
 
 from .serializers import (
     RequestOTPSerializer,
     VerifyOTPSerializer,
     VendorProfileSerializer,
-    VendorPriceListSerializer,  # ✨ NEW
-    VendorPriceCreateSerializer,  # ✨ NEW
-    BulkVendorPriceSerializer,  # ✨ NEW
-    VendorPriceAuditSerializer,  # ✨ NEW
-    VendorPriceAttributeSerializer,  # ✨ NEW
-    VendorPriceAddOnSerializer,  # ✨ NEW
-    VendorPriceFoldingSerializer,  # ✨ NEW
-    VendorPriceCustomisationSerializer,  # ✨ NEW
+    VendorPricingSerializer,
+    VendorPricingBulkCreateSerializer,
+    VendorPricingCSVSerializer,
+    VendorPricingStatsSerializer,
+    VendorPricingTemplateSerializer
 )
 
 from .models import (
     VendorProfile,
-    VendorPrice,  # ✨ NEW
-    VendorPriceAttribute,  # ✨ NEW
-    VendorPriceAddOn,  # ✨ NEW
-    VendorPriceFolding,  # ✨ NEW
-    VendorPriceCustomisation,  # ✨ NEW
-    VendorPriceAudit,  # ✨ NEW
+    VendorPricing,
+    VendorPricingTemplate
 )
 
 from catalog.models import (
@@ -41,11 +41,7 @@ from catalog.models import (
 # ==================================================================================
 # AUTHENTICATION VIEWS
 # ==================================================================================
-# ✅ UNCHANGED - Kept as is
 
-# --------------------------------
-# REQUEST OTP
-# --------------------------------
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def request_otp(request):
@@ -59,9 +55,6 @@ def request_otp(request):
     return Response(serializer.errors, status=400)
 
 
-# --------------------------------
-# VERIFY OTP (JWT)
-# --------------------------------
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def verify_otp(request):
@@ -71,34 +64,24 @@ def verify_otp(request):
     return Response(serializer.errors, status=400)
 
 
-# --------------------------------
-# UPLOAD PROFILE (JWT Protected)
-# --------------------------------
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@authentication_classes([VendorJWTAuthentication])
+@permission_classes([IsVendorJWT])
 @parser_classes([MultiPartParser, FormParser])
 def upload_profile(request):
     vendor = request.user
 
     profile, created = VendorProfile.objects.get_or_create(vendor=vendor)
 
-    # Remove empty values
     data = request.data.copy()
-
     for key, value in list(data.items()):
         if value in ["", None]:
             data.pop(key)
 
-    serializer = VendorProfileSerializer(
-        profile,
-        data=data,
-        partial=True
-    )
+    serializer = VendorProfileSerializer(profile, data=data, partial=True)
 
     if serializer.is_valid():
         serializer.save()
-
-        # ✅ Mark profile as completed AFTER successful save
         profile.is_profile_completed = True
         profile.save(update_fields=["is_profile_completed"])
 
@@ -111,15 +94,12 @@ def upload_profile(request):
     return Response(serializer.errors, status=400)
 
 
-# --------------------------------
-# GET PROFILE (JWT Protected)
-# --------------------------------
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@authentication_classes([VendorJWTAuthentication])
+@permission_classes([IsVendorJWT])
 def get_vendor_profile(request):
     vendor = request.user
 
-    # Always create if not exists
     profile, created = VendorProfile.objects.get_or_create(vendor=vendor)
 
     serializer = VendorProfileSerializer(profile)
@@ -130,310 +110,353 @@ def get_vendor_profile(request):
 
 
 # ==================================================================================
-# 🔄 REFACTORED: VENDOR PRICING VIEWS
+# VENDOR PRICING VIEWSET
 # ==================================================================================
 
+class VendorPricingViewSet(viewsets.ModelViewSet):
+    serializer_class = VendorPricingSerializer
+    authentication_classes = [VendorJWTAuthentication]
+    permission_classes = [IsVendorJWT]
 
-# --------------------------------
-# Vendor Price ViewSet
-# --------------------------------
-class VendorPriceViewSet(viewsets.ModelViewSet):
-    """
-    CRUD operations for vendor pricing
-    """
-    permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
-    
-    def get_serializer_class(self):
-        if self.action in ['create', 'update', 'partial_update']:
-            return VendorPriceCreateSerializer
-        return VendorPriceListSerializer
-    
     def get_queryset(self):
-        """
-        Returns prices for authenticated vendor only
-        Supports filtering by service, category, subcategory, item
-        """
-        queryset = VendorPrice.objects.filter(
-            vendor=self.request.user
-        ).select_related(
-            'service', 'category', 'subcategory', 'item', 'delivery_tier'
-        ).prefetch_related(
-            'attribute_selections',
-            'attribute_selections__attribute_option',
-            'addon_options',
-            'addon_options__addon',
-            'folding_options',
-            'folding_options__folding_option',
-            'customisation_options',
-            'customisation_options__customisation_option',
-        ).order_by('-updated_at')
-        
-        # Optional filters
-        service_id = self.request.query_params.get('service_id')
-        category_id = self.request.query_params.get('category_id')
-        subcategory_id = self.request.query_params.get('subcategory_id')
-        item_id = self.request.query_params.get('item_id')
-        delivery_tier_id = self.request.query_params.get('delivery_tier_id')
-        
-        if service_id:
-            queryset = queryset.filter(service_id=service_id)
-        if category_id:
-            queryset = queryset.filter(category_id=category_id)
-        if subcategory_id:
-            queryset = queryset.filter(subcategory_id=subcategory_id)
-        if item_id:
-            queryset = queryset.filter(item_id=item_id)
-        if delivery_tier_id:
-            queryset = queryset.filter(delivery_tier_id=delivery_tier_id)
-        
-        return queryset
-    
-    def perform_create(self, serializer):
-        """Auto-set vendor from authenticated user"""
-        serializer.save()
-    
-    def perform_update(self, serializer):
-        """Auto-set vendor from authenticated user"""
-        serializer.save()
-    
-    @action(detail=False, methods=['post'], url_path='bulk-create')
-    def bulk_create(self, request):
-        """
-        POST /api/vendors/prices/bulk-create/
-        Bulk create/update vendor prices (max 500 at once)
-        """
-        serializer = BulkVendorPriceSerializer(
-            data=request.data,
-            context={'request': request}
+        return VendorPricing.objects.filter(vendor=self.request.user).select_related(
+            'service', 'category', 'subcategory', 'item'
         )
-        
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
+
+    def perform_create(self, serializer):
+        serializer.save(vendor=self.request.user)
+
+    # ─── BULK CREATE ───
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        serializer = VendorPricingBulkCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        service_ids = serializer.validated_data.get('service_ids', [])
+        category_ids = serializer.validated_data.get('category_ids', [])
+        subcategory_ids = serializer.validated_data.get('subcategory_ids', [])
+        item_ids = serializer.validated_data.get('item_ids', [])
+        base_price = serializer.validated_data['base_price']
+
+        vendor = request.user
+        created_count = 0
+        skipped_count = 0
+        pricing_entries = []
+
+        if not any([service_ids, category_ids, subcategory_ids, item_ids]):
+            pricing, created = VendorPricing.objects.get_or_create(
+                vendor=vendor, service=None, category=None,
+                subcategory=None, item=None,
+                defaults={'base_price': base_price}
+            )
+            if created:
+                created_count += 1
+                pricing_entries.append(pricing)
+            else:
+                pricing.base_price = base_price
+                pricing.save()
+                skipped_count += 1
+        else:
+            if service_ids and not category_ids and not subcategory_ids and not item_ids:
+                for service_id in service_ids:
+                    pricing, created = VendorPricing.objects.get_or_create(
+                        vendor=vendor, service_id=service_id, category=None,
+                        subcategory=None, item=None,
+                        defaults={'base_price': base_price}
+                    )
+                    if created:
+                        created_count += 1
+                        pricing_entries.append(pricing)
+                    else:
+                        pricing.base_price = base_price
+                        pricing.save()
+                        skipped_count += 1
+
+            elif service_ids and category_ids and not subcategory_ids and not item_ids:
+                for service_id in service_ids:
+                    for category_id in category_ids:
+                        pricing, created = VendorPricing.objects.get_or_create(
+                            vendor=vendor, service_id=service_id, category_id=category_id,
+                            subcategory=None, item=None,
+                            defaults={'base_price': base_price}
+                        )
+                        if created:
+                            created_count += 1
+                            pricing_entries.append(pricing)
+                        else:
+                            pricing.base_price = base_price
+                            pricing.save()
+                            skipped_count += 1
+
+            elif service_ids and category_ids and subcategory_ids and item_ids:
+                for service_id in service_ids:
+                    for category_id in category_ids:
+                        for subcategory_id in subcategory_ids:
+                            for item_id in item_ids:
+                                pricing, created = VendorPricing.objects.get_or_create(
+                                    vendor=vendor, service_id=service_id,
+                                    category_id=category_id, subcategory_id=subcategory_id,
+                                    item_id=item_id,
+                                    defaults={'base_price': base_price}
+                                )
+                                if created:
+                                    created_count += 1
+                                    pricing_entries.append(pricing)
+                                else:
+                                    pricing.base_price = base_price
+                                    pricing.save()
+                                    skipped_count += 1
+
+        return Response({
+            'created': created_count,
+            'updated': skipped_count,
+            'total': created_count + skipped_count,
+            'message': f'Created {created_count} new pricing rules, updated {skipped_count} existing rules'
+        }, status=status.HTTP_201_CREATED)
+
+    # ─── BULK UPDATE ───
+    @action(detail=False, methods=['post'])
+    def bulk_update(self, request):
+        ids = request.data.get('ids', [])
+        base_price = request.data.get('base_price')
+
+        if not ids:
+            return Response({'error': 'No IDs provided'}, status=status.HTTP_400_BAD_REQUEST)
+        if base_price is None:
+            return Response({'error': 'base_price is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        updated = VendorPricing.objects.filter(
+            vendor=request.user, id__in=ids
+        ).update(base_price=base_price)
+
+        return Response({'updated': updated, 'message': f'Updated {updated} pricing rules'})
+
+    # ─── BULK DELETE ───
+    @action(detail=False, methods=['post'])
+    def bulk_delete(self, request):
+        ids = request.data.get('ids', [])
+
+        if not ids:
+            return Response({'error': 'No IDs provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+        deleted, _ = VendorPricing.objects.filter(
+            vendor=request.user, id__in=ids
+        ).delete()
+
+        return Response({'deleted': deleted, 'message': f'Deleted {deleted} pricing rules'})
+
+    # ─── STATS ───
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        vendor = request.user
+
+        total_rules = VendorPricing.objects.filter(vendor=vendor, is_active=True).count()
+        total_items = ItemType.objects.filter(is_active=True).count()
+        items_with_pricing = VendorPricing.objects.filter(
+            vendor=vendor, is_active=True, item__isnull=False
+        ).values('item').distinct().count()
+
+        coverage = (items_with_pricing / total_items * 100) if total_items > 0 else 0
+
+        pricing_by_level = VendorPricing.objects.filter(
+            vendor=vendor, is_active=True
+        ).values('pricing_level').annotate(count=Count('id'))
+        pricing_by_level_dict = {item['pricing_level']: item['count'] for item in pricing_by_level}
+
+        avg_price = VendorPricing.objects.filter(
+            vendor=vendor, is_active=True
+        ).aggregate(avg=Avg('base_price'))['avg'] or 0
+
+        data = {
+            'total_rules': total_rules,
+            'coverage_percentage': round(coverage, 2),
+            'missing_items_count': total_items - items_with_pricing,
+            'pricing_by_level': pricing_by_level_dict,
+            'average_price': round(avg_price, 2)
+        }
+
+        serializer = VendorPricingStatsSerializer(data)
+        return Response(serializer.data)
+
+    # ─── SPREADSHEET VIEW (now supports item_id filter) ───
+    @action(detail=False, methods=['get'])
+    def spreadsheet_view(self, request):
+        vendor = request.user
+
+        service_id = request.query_params.get('service_id')
+        category_id = request.query_params.get('category_id')
+        subcategory_id = request.query_params.get('subcategory_id')
+        item_id = request.query_params.get('item_id')  # ✨ NEW
+
+        items = ItemType.objects.filter(is_active=True).prefetch_related(
+            'services', 'categories', 'subcategories'
+        ).distinct()
+
+        if service_id:
+            items = items.filter(services__id=service_id)
+        if category_id:
+            items = items.filter(categories__id=category_id)
+        if subcategory_id:
+            items = items.filter(subcategories__id=subcategory_id)
+        if item_id:  # ✨ NEW
+            items = items.filter(id=item_id)
+
+        rows = []
+        for item in items:
+            for service in item.services.filter(is_active=True):
+                if service_id and str(service.id) != str(service_id):
+                    continue
+                for category in item.categories.filter(is_active=True):
+                    if category_id and str(category.id) != str(category_id):
+                        continue
+                    for subcategory in item.subcategories.filter(category=category, is_active=True):
+                        if subcategory_id and str(subcategory.id) != str(subcategory_id):
+                            continue
+
+                        price, price_obj = VendorPricing.get_price_for_item(
+                            vendor_id=vendor.id,
+                            service_id=service.id,
+                            category_id=category.id,
+                            subcategory_id=subcategory.id,
+                            item_id=item.id
+                        )
+                        rows.append({
+                            'pricing_id': price_obj.id if price_obj else None,
+                            'service_id': service.id,
+                            'service_name': service.name,
+                            'category_id': category.id,
+                            'category_name': category.name,
+                            'subcategory_id': subcategory.id,
+                            'subcategory_name': subcategory.name,
+                            'item_id': item.id,
+                            'item_name': item.name,
+                            'base_price': float(price) if price else None,
+                            'pricing_level': price_obj.pricing_level if price_obj else None,
+                            'has_price': price is not None
+                        })
+
+        return Response({'count': len(rows), 'results': rows})
+
+    # ─── IMPORT CSV ───
+    @action(detail=False, methods=['post'])
+    def import_csv(self, request):
+        csv_file = request.FILES.get('file')
+
+        if not csv_file:
+            return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+        if not csv_file.name.endswith('.csv'):
+            return Response({'error': 'File must be CSV format'}, status=status.HTTP_400_BAD_REQUEST)
+
+        vendor = request.user
         created_count = 0
         updated_count = 0
         errors = []
-        
-        with transaction.atomic():
-            for idx, price_data in enumerate(serializer.validated_data['prices']):
-                try:
-                    # Check if combination exists
-                    existing = VendorPrice.objects.filter(
-                        vendor=request.user,
-                        service=price_data['service'],
-                        category=price_data['category'],
-                        subcategory=price_data['subcategory'],
-                        item=price_data['item'],
-                        delivery_tier=price_data.get('delivery_tier')
-                    ).first()
-                    
-                    if existing:
-                        # Update existing
-                        for key, value in price_data.items():
-                            if key not in ['attributes', 'addons', 'foldings', 'customisations']:
-                                setattr(existing, key, value)
-                        existing.save()
-                        updated_count += 1
-                    else:
-                        # Create new
-                        price_serializer = VendorPriceCreateSerializer(
-                            data=price_data,
-                            context={'request': request}
+
+        try:
+            decoded_file = csv_file.read().decode('utf-8')
+            csv_data = csv.DictReader(io.StringIO(decoded_file))
+
+            with transaction.atomic():
+                for row_num, row in enumerate(csv_data, start=2):
+                    try:
+                        service_name = row.get('service', '').strip()
+                        category_name = row.get('category', '').strip()
+                        subcategory_name = row.get('subcategory', '').strip()
+                        item_name = row.get('item', '').strip()
+                        price = float(row.get('price', 0))
+
+                        service = ServiceCategory.objects.filter(name=service_name).first() if service_name else None
+                        category = Category.objects.filter(name=category_name).first() if category_name else None
+                        subcategory = Subcategory.objects.filter(name=subcategory_name).first() if subcategory_name else None
+                        item = ItemType.objects.filter(name=item_name).first() if item_name else None
+
+                        pricing, created = VendorPricing.objects.update_or_create(
+                            vendor=vendor, service=service, category=category,
+                            subcategory=subcategory, item=item,
+                            defaults={'base_price': price}
                         )
-                        if price_serializer.is_valid():
-                            price_serializer.save()
+
+                        if created:
                             created_count += 1
                         else:
-                            errors.append({
-                                'index': idx,
-                                'errors': price_serializer.errors
-                            })
-                
-                except Exception as e:
-                    errors.append({
-                        'index': idx,
-                        'error': str(e)
-                    })
-        
-        return Response({
-            'created': created_count,
-            'updated': updated_count,
-            'errors': errors
-        }, status=status.HTTP_200_OK if not errors else status.HTTP_207_MULTI_STATUS)
-    
-    @action(detail=False, methods=['get'], url_path='missing-combinations')
-    def missing_combinations(self, request):
-        """
-        GET /api/vendors/prices/missing-combinations/
-        Returns possible combinations that vendor hasn't priced yet
-        """
+                            updated_count += 1
+
+                    except Exception as e:
+                        errors.append(f"Row {row_num}: {str(e)}")
+
+            return Response({
+                'created': created_count,
+                'updated': updated_count,
+                'errors': errors,
+                'message': f'Imported {created_count + updated_count} pricing rules'
+            })
+
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    # ─── EXPORT CSV ───
+    @action(detail=False, methods=['get'])
+    def export_csv(self, request):
         vendor = request.user
-        
-        # Get all priced combinations
-        priced_combos = set(
-            VendorPrice.objects.filter(vendor=vendor).values_list(
-                'service_id', 'category_id', 'subcategory_id', 'item_id', 'delivery_tier_id'
-            )
+        pricing_rules = VendorPricing.objects.filter(vendor=vendor, is_active=True).select_related(
+            'service', 'category', 'subcategory', 'item'
         )
-        
-        # Generate all possible combinations from catalog
-        missing = []
-        items = ItemType.objects.filter(is_active=True).prefetch_related(
-            'services', 'categories', 'subcategories'
-        )
-        
-        for item in items:
-            for service in item.services.filter(is_active=True):
-                for category in item.categories.filter(is_active=True):
-                    for subcategory in item.subcategories.filter(
-                        is_active=True,
-                        category=category
-                    ):
-                        # Standard tier (None)
-                        combo = (service.id, category.id, subcategory.id, item.id, None)
-                        if combo not in priced_combos:
-                            missing.append({
-                                'service_id': service.id,
-                                'service_name': service.name,
-                                'category_id': category.id,
-                                'category_name': category.name,
-                                'subcategory_id': subcategory.id,
-                                'subcategory_name': subcategory.name,
-                                'item_id': item.id,
-                                'item_name': item.name,
-                                'delivery_tier_id': None,
-                                'delivery_tier_name': 'Standard'
-                            })
-        
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['service', 'category', 'subcategory', 'item', 'price'])
+
+        for pricing in pricing_rules:
+            writer.writerow([
+                pricing.service.name if pricing.service else '',
+                pricing.category.name if pricing.category else '',
+                pricing.subcategory.name if pricing.subcategory else '',
+                pricing.item.name if pricing.item else '',
+                str(pricing.base_price)
+            ])
+
+        response = HttpResponse(output.getvalue(), content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="vendor_pricing_{vendor.id}.csv"'
+        return response
+
+
+# ==================================================================================
+# VENDOR PRICING TEMPLATE VIEWSET
+# ==================================================================================
+
+class VendorPricingTemplateViewSet(viewsets.ModelViewSet):
+    serializer_class = VendorPricingTemplateSerializer
+    authentication_classes = [VendorJWTAuthentication]
+    permission_classes = [IsVendorJWT]
+
+    def get_queryset(self):
+        return VendorPricingTemplate.objects.filter(vendor=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(vendor=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def apply(self, request, pk=None):
+        template = self.get_object()
+        vendor = request.user
+        created_count = 0
+
+        with transaction.atomic():
+            for template_item in template.items.all():
+                pricing, created = VendorPricing.objects.get_or_create(
+                    vendor=vendor,
+                    service=template_item.service,
+                    category=template_item.category,
+                    subcategory=template_item.subcategory,
+                    item=template_item.item,
+                    defaults={'base_price': template_item.base_price}
+                )
+                if created:
+                    created_count += 1
+                else:
+                    pricing.base_price = template_item.base_price
+                    pricing.save()
+
         return Response({
-            'count': len(missing),
-            'combinations': missing[:100]  # Limit to 100 for performance
+            'message': f'Applied template "{template.name}", created {created_count} pricing rules'
         })
-    
-    @action(detail=False, methods=['get'], url_path='audit-log')
-    def audit_log(self, request):
-        """
-        GET /api/vendors/prices/audit-log/
-        Returns price change history for vendor
-        """
-        audit_logs = VendorPriceAudit.objects.filter(
-            vendor_price__vendor=request.user
-        ).select_related(
-            'vendor_price__service',
-            'vendor_price__item',
-            'changed_by'
-        ).order_by('-changed_at')[:100]  # Last 100 changes
-        
-        serializer = VendorPriceAuditSerializer(audit_logs, many=True)
-        return Response(serializer.data)
-
-
-# --------------------------------
-# Vendor Price - Manage Attributes
-# --------------------------------
-class VendorPriceAttributeViewSet(viewsets.ModelViewSet):
-    """
-    Manage attribute options for a vendor price
-    """
-    serializer_class = VendorPriceAttributeSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_queryset(self):
-        """Only show attributes for vendor's own prices"""
-        vendor_price_id = self.request.query_params.get('vendor_price_id')
-        
-        queryset = VendorPriceAttribute.objects.filter(
-            vendor_price__vendor=self.request.user
-        ).select_related(
-            'attribute_option',
-            'attribute_option__attribute_type'
-        )
-        
-        if vendor_price_id:
-            queryset = queryset.filter(vendor_price_id=vendor_price_id)
-        
-        return queryset
-
-
-# --------------------------------
-# Vendor Price - Manage Add-Ons
-# --------------------------------
-class VendorPriceAddOnViewSet(viewsets.ModelViewSet):
-    """
-    Manage add-ons for a vendor price
-    """
-    serializer_class = VendorPriceAddOnSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_queryset(self):
-        """Only show add-ons for vendor's own prices"""
-        vendor_price_id = self.request.query_params.get('vendor_price_id')
-        
-        queryset = VendorPriceAddOn.objects.filter(
-            vendor_price__vendor=self.request.user
-        ).select_related('addon')
-        
-        if vendor_price_id:
-            queryset = queryset.filter(vendor_price_id=vendor_price_id)
-        
-        return queryset
-
-
-# --------------------------------
-# Vendor Price - Manage Folding
-# --------------------------------
-class VendorPriceFoldingViewSet(viewsets.ModelViewSet):
-    """
-    Manage folding options for a vendor price
-    """
-    serializer_class = VendorPriceFoldingSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_queryset(self):
-        """Only show folding for vendor's own prices"""
-        vendor_price_id = self.request.query_params.get('vendor_price_id')
-        
-        queryset = VendorPriceFolding.objects.filter(
-            vendor_price__vendor=self.request.user
-        ).select_related('folding_option')
-        
-        if vendor_price_id:
-            queryset = queryset.filter(vendor_price_id=vendor_price_id)
-        
-        return queryset
-
-
-# --------------------------------
-# Vendor Price - Manage Customisation
-# --------------------------------
-class VendorPriceCustomisationViewSet(viewsets.ModelViewSet):
-    """
-    Manage customisation options for a vendor price
-    """
-    serializer_class = VendorPriceCustomisationSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_queryset(self):
-        """Only show customisations for vendor's own prices"""
-        vendor_price_id = self.request.query_params.get('vendor_price_id')
-        
-        queryset = VendorPriceCustomisation.objects.filter(
-            vendor_price__vendor=self.request.user
-        ).select_related('customisation_option')
-        
-        if vendor_price_id:
-            queryset = queryset.filter(vendor_price_id=vendor_price_id)
-        
-        return queryset
-
-
-# ==================================================================================
-# ❌ REMOVED VIEWSETS
-# ==================================================================================
-# These have been replaced by the new pricing structure:
-# - VendorServicePricingViewSet → Replaced by VendorPriceViewSet
-# - VendorItemAddOnViewSet → Replaced by VendorPriceAddOnViewSet
-# - VendorItemFoldingViewSet → Replaced by VendorPriceFoldingViewSet
-# - VendorItemCustomisationViewSet → Replaced by VendorPriceCustomisationViewSet
-# ==================================================================================
